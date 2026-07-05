@@ -1,16 +1,9 @@
-"""SQLite connection helper.
-
-The database is opened READ-WRITE: registration inserts rows and the account
-change-password flow issues UPDATEs. The change-password UPDATE is built by unsafe
-string concatenation on a raw-stored username, which is the intended second-order
-SQL injection sink (see app.py).
-"""
+"""SQLite connection helper (read-write; the account UPDATE is the 2nd-order SQLi sink)."""
 
 import os
 import sqlite3
 
-# DB lives outside /app so `web` can write it (journal/WAL need a writable dir)
-# while the application source under /app stays root-owned and read-only to `web`.
+# DB lives outside /app so `web` can write it; /app stays root-owned, read-only to `web`.
 DB_PATH = os.environ.get("SHOPSTACK_DB", "/home/web/shopstack.db")
 
 

@@ -1,12 +1,7 @@
-"""ShopStack — deliberately vulnerable CTF web app (HARD revision).
+"""ShopStack — deliberately vulnerable CTF web app.
 
-Stage 1: SECOND-ORDER SQL injection. /login is parameterized and safe. /register
-         stores the chosen username RAW. /account change-password concatenates that
-         stored username into an UPDATE, so a username registered as `admin'-- `
-         rewrites the admin account's password.
-Stage 2: Jinja2 SSTI via render_template_string on /admin/announcement.
-
-Served in production by gunicorn with DEBUG disabled.
+Intentional sinks: second-order SQLi (register stores the raw username, account
+concatenates it into an UPDATE) and Jinja2 SSTI on /admin/announcement.
 """
 
 import os
@@ -71,7 +66,7 @@ def login():
     username = request.form.get("username", "")
     password = request.form.get("password", "")
 
-    # SAFE: parameterized query — first-order injection at /login does not work.
+    # SAFE: parameterized — no first-order injection here.
     db = get_db()
     try:
         row = db.execute(
@@ -104,10 +99,7 @@ def register():
 
     db = get_db()
     try:
-        # INTENTIONALLY VULNERABLE: the username is stored RAW (no sanitization). The
-        # INSERT itself is parameterized, so the exact bytes — including quotes and
-        # `--` — are persisted verbatim, planting the second-order injection payload
-        # that /account later concatenates into an UPDATE.
+        # INTENTIONALLY VULNERABLE: username stored raw — plants the 2nd-order SQLi payload.
         db.execute(
             "INSERT INTO users (username, password, is_admin) VALUES (?, ?, 0)",
             (username, password),
@@ -130,12 +122,8 @@ def account():
     new_password = request.form.get("new_password", "")
     stored_username = session.get("username", "")
 
-    # The new password is passed as a bound parameter — NOT a sink. The ONLY
-    # injectable point is the raw-stored username below.
-    # INTENTIONALLY VULNERABLE: the raw-stored username is concatenated directly into
-    # the UPDATE (second-order SQLi). A user registered as `admin'-- ` makes this:
-    #   UPDATE users SET password=? WHERE username='admin'-- '
-    # which rewrites the admin row's password instead of the attacker's own.
+    # INTENTIONALLY VULNERABLE: raw-stored username concatenated into the UPDATE
+    # (2nd-order SQLi). new_password stays a bound parameter — the username is the only sink.
     query = (
         "UPDATE users SET password = ? "
         "WHERE username = '" + stored_username + "'"
@@ -168,9 +156,7 @@ def admin():
 @admin_required
 def announcement_preview():
     tpl = request.form.get("announcement", "")
-    # INTENTIONALLY VULNERABLE: attacker-controlled string passed to
-    # render_template_string, so Jinja2 evaluates it server-side (SSTI -> RCE).
-    # Reachable only after Stage 1 thanks to @admin_required.
+    # INTENTIONALLY VULNERABLE: attacker input to render_template_string (SSTI -> RCE).
     rendered = render_template_string(tpl)
     return render_template("admin.html", preview=rendered)
 

@@ -130,17 +130,19 @@ def account():
     new_password = request.form.get("new_password", "")
     stored_username = session.get("username", "")
 
+    # The new password is passed as a bound parameter — NOT a sink. The ONLY
+    # injectable point is the raw-stored username below.
     # INTENTIONALLY VULNERABLE: the raw-stored username is concatenated directly into
-    # an UPDATE (second-order SQLi). A user registered as `admin'-- ` makes this:
-    #   UPDATE users SET password='<new>' WHERE username='admin'-- '
+    # the UPDATE (second-order SQLi). A user registered as `admin'-- ` makes this:
+    #   UPDATE users SET password=? WHERE username='admin'-- '
     # which rewrites the admin row's password instead of the attacker's own.
     query = (
-        "UPDATE users SET password = '" + new_password + "' "
+        "UPDATE users SET password = ? "
         "WHERE username = '" + stored_username + "'"
     )
     db = get_db()
     try:
-        db.execute(query)
+        db.execute(query, (new_password,))
         db.commit()
     except Exception:
         return render_template("account.html", username=stored_username, error="update failed")

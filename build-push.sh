@@ -9,7 +9,7 @@ set -eu
 
 REGISTRY="registry.ce-isag.com"
 PROJECT="isag-sf11"
-NAME="shopstack"
+NAME="fake_shopee"
 TAG="${1:-latest}"
 
 IMAGE="${REGISTRY}/${PROJECT}/${NAME}:${TAG}"

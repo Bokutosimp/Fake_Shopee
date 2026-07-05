@@ -1,13 +1,28 @@
 # ShopStack — deliberately vulnerable CTF challenge image (HARD revision).
 # NOTE: no EXPOSE on purpose. GZ::CTF maps the internal port 80 to a random host
 # port; declaring EXPOSE is unnecessary and deviates from the platform contract.
-FROM python:3-slim
+#
+# Multi-stage: the SUID binary is compiled in a throwaway `build` stage, so the
+# ~180MB toolchain (gcc/libc6-dev/make) never lands in the final image. This
+# keeps every runtime layer under Cloudflare's ~100MB per-blob push limit AND
+# removes compilers from the challenge box (extra hardening). functionbin is
+# built -static (see privesc/Makefile), so it needs no libs at runtime.
 
-# Build tooling for the SUID binary + sqlite3 CLI + util-linux (setpriv) and su.
+# --- Build stage: compile the static SUID binary ----------------------------
+FROM python:3-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libc6-dev \
         make \
+    && rm -rf /var/lib/apt/lists/*
+COPY privesc/ /tmp/privesc/
+RUN make -C /tmp/privesc
+
+# --- Runtime stage ----------------------------------------------------------
+FROM python:3-slim
+
+# Runtime-only tooling: sqlite3 CLI (seed DB), util-linux (setpriv), passwd (su).
+RUN apt-get update && apt-get install -y --no-install-recommends \
         sqlite3 \
         util-linux \
         passwd \
@@ -28,13 +43,10 @@ COPY app/ /app/
 RUN chown -R root:root /app && chmod -R 0644 /app \
     && find /app -type d -exec chmod 0755 {} \;
 
-# --- Build the SUID privesc binary ------------------------------------------
-COPY privesc/ /tmp/privesc/
-RUN make -C /tmp/privesc \
-    && cp /tmp/privesc/functionbin /usr/local/bin/functionbin \
-    && chown root:root /usr/local/bin/functionbin \
-    && chmod 4755 /usr/local/bin/functionbin \
-    && rm -rf /tmp/privesc
+# --- Install the SUID privesc binary (compiled in the build stage) ----------
+COPY --from=build /tmp/privesc/functionbin /usr/local/bin/functionbin
+RUN chown root:root /usr/local/bin/functionbin \
+    && chmod 4755 /usr/local/bin/functionbin
 
 # --- Environmental hardening (Stage 2) --------------------------------------
 # Remove common reverse-shell / download tools so the obvious payloads fail and

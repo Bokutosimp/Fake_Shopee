@@ -23,6 +23,12 @@ printf '%s\n' "$FLAG" > /root/root.txt
 chown root:root /root/root.txt
 chmod 0400 /root/root.txt
 
+# Scrub the flag from the environment. setpriv (below) preserves the env, so if
+# GZCTF_FLAG stayed set it would be inherited by gunicorn and readable as `web`
+# via `env` / /proc/self/environ — letting an SSTI RCE read the flag directly and
+# skip the Stage-3 SUID read entirely. Unset it now that /root/root.txt is written.
+unset GZCTF_FLAG
+
 # --- User (foothold) flag ----------------------------------------------------
 # Static, non-secret marker. Never contains the real flag.
 printf '%s\n' "SHOPSTACK{web_foothold_reached}" > /home/web/user.txt

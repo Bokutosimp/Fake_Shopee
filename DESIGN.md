@@ -210,12 +210,12 @@ Harbor = private Docker registry GZ::CTF pulls from. Same image, no rebuild.
 Registry host `registry.ce-isag.com`, project `isag-sf11` (per platform manual).
 Build for `linux/amd64` — the platform runs amd64 nodes:
 ```
-docker build . --platform linux/amd64 -t registry.ce-isag.com/isag-sf11/shopstack:latest
+docker build . --platform linux/amd64 -t registry.ce-isag.com/isag-sf11/fake_shopee:latest
 docker login registry.ce-isag.com    # account issued by the platform admin
-docker push registry.ce-isag.com/isag-sf11/shopstack:latest
+docker push registry.ce-isag.com/isag-sf11/fake_shopee:latest
 ```
 Or use the helper: `./build-push.sh [TAG]` (defaults to `latest`).
-Hand `registry.ce-isag.com/isag-sf11/shopstack:latest` to the GZCTF admin.
+Hand `registry.ce-isag.com/isag-sf11/fake_shopee:latest` to the GZCTF admin.
 One-time platform prereq: GZ::CTF needs a Harbor **robot account** / pull secret configured; if pulls fail with auth errors, check that.
 Note: if a push stalls, retry after a moment — the registry sits behind Cloudflare rate limits (per platform manual).
 
@@ -224,13 +224,13 @@ Note: if a push stalls, retry after a moment — the registry sits behind Cloudf
 | Field           | Value                                       | Notes                                                     |
 |-----------------|---------------------------------------------|-----------------------------------------------------------|
 | Challenge type  | Dynamic Container                           | Per-team isolated instance.                               |
-| Container image | `registry.ce-isag.com/isag-sf11/shopstack:latest` | Paste from 8.2.                                      |
+| Container image | `registry.ce-isag.com/isag-sf11/fake_shopee:latest` | Paste from 8.2.                                    |
 | `ExposePort`    | `80`                                        | App on 80 internally. **No `EXPOSE` in Dockerfile.**     |
 | `MemoryLimit`   | `128` (MB)                                  | Lightweight.                                              |
 | `CPUCount`      | `1`                                         | —                                                        |
 | `StorageLimit`  | `256` (MB)                                  | —                                                        |
 | Network mode    | **Isolated**                                | Hands out a shell; block egress/pivots.                  |
-| Flag template   | `ISAG{[TEAM_HASH]}`                         | Per-team dynamic flag → injected as `GZCTF_FLAG`.        |
+| Flag template   | `ISAG{…}` (static — set on platform)        | Literal, NO `[TEAM_HASH]` → same flag for all teams, injected as `GZCTF_FLAG`. Do NOT commit the real value (repo is public). |
 
 - **Do not** set `no-new-privileges` (breaks the SUID privesc).
 - Moving Phase 1 → Phase 2 needs no image change: `GZCTF_FLAG` fallback + port-80/no-EXPOSE already baked in.

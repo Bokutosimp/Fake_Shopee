@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+privesc/Makefile text eol=lf
+privesc/web.profile text eol=lf
+app/seed.sql text eol=lf

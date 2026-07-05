@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Admin — ShopStack{% endblock %}
+{% block content %}
+<section class="admin">
+    <h1>Store Administration</h1>
+    <p>Welcome, {{ session.get('username', 'admin') }}.</p>
+
+    <div class="panel">
+        <h2>Store Announcement</h2>
+        <p>Compose a store-wide announcement. Use the live preview to see how it
+           renders before publishing.</p>
+        <form method="post" action="{{ url_for('announcement_preview') }}">
+            <textarea name="announcement" rows="4" placeholder="e.g. Summer sale — 20% off all boards!"></textarea>
+            <button type="submit">Preview</button>
+        </form>
+        {% if preview is not none %}
+        <div class="preview">
+            <h3>Preview</h3>
+            <div class="preview-body">{{ preview|safe }}</div>
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

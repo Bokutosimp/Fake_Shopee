@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}ShopStack — Artisanal Keyboards{% endblock %}
+{% block content %}
+<section class="hero">
+    <h1>Artisanal Mechanical Keyboards</h1>
+    <p>Hand-built boards for people who take typing seriously.</p>
+</section>
+<section class="grid">
+    {% for p in products %}
+    <article class="card">
+        <h2>{{ p.name }}</h2>
+        <p class="desc">{{ p.desc }}</p>
+        <p class="price">${{ p.price }}</p>
+        <button class="buy" disabled>Add to cart</button>
+    </article>
+    {% endfor %}
+</section>
+{% endblock %}

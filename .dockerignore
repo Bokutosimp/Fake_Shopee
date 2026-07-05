@@ -1,0 +1,7 @@
+DESIGN.md
+SOLVE.md
+docker-compose.yml
+.git
+**/__pycache__
+*.pyc
+*.db

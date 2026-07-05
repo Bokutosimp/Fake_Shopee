@@ -71,6 +71,7 @@ form button {
     font: inherit;
 }
 .error { color: #b00020; font-weight: 600; }
+.message { color: #1b7f3b; font-weight: 600; }
 .hint { color: #888; font-size: .85rem; }
 
 .panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1.4rem; margin-top: 1rem; }

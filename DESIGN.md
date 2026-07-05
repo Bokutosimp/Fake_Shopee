@@ -1,155 +1,136 @@
-# DESIGN.md — "ShopStack" CTF Challenge
+# DESIGN.md — "ShopStack" CTF Challenge (HARD)
 
 > **Platform:** GZ::CTF (Dynamic Container, per-team instance)
 > **Category:** Web → Pwn (chained)
-> **Status:** Design blueprint. A separate build agent implements from this file. **No application code lives here.**
+> **Difficulty target:** **Hard** (assignment brief). Design principle: **each stage is hard to *discover* but basic to *execute* once identified.** Difficulty comes from non-obvious attack vectors, not exotic exploitation — this also resists low-effort AI-assisted solving (the "obvious" payload fails on this box).
+> **Status:** Design blueprint. A separate build/upgrade agent implements from this file. **No application code lives here.**
 > **Source of truth:** This document. If any instruction here is ambiguous or physically impossible, the build agent must STOP and report rather than improvise.
 >
-> **Build phasing:** **Phase 1 (priority) = a working LOCAL Docker build the author can run and solve on their own machine.** **Phase 2 (later) = publish to a Harbor registry and wire into GZ::CTF** (config only, no code changes). The GZCTF-shaped constraints (no `EXPOSE`, `GZCTF_FLAG` env var with a local fallback, port 80 internal, non-root `web` + SUID) are baked in from Phase 1 **on purpose** — they cost nothing locally and mean Phase 2 is a config/push step, not a rebuild. Build and verify Phase 1 fully before touching Phase 2.
+> **Build phasing:** **Phase 1 (priority) = a working LOCAL Docker build the author can run and solve.** **Phase 2 (later) = publish to Harbor + wire into GZ::CTF** (config only, no code changes). GZCTF-shaped constraints (no `EXPOSE`, `GZCTF_FLAG` env var with local fallback, port 80 internal, non-root `web` + SUID) are baked in from Phase 1 on purpose.
+>
+> **NOTE — this is the HARD revision.** A prior Phase-1 build (filtered UNION SQLi, self-announcing SUID, breadcrumb) already passed its checks. §12 lists the exact deltas to upgrade that build to this spec rather than rebuilding.
 
 ---
 
 ## 1. Overview & Theme
 
-**ShopStack** is a deliberately vulnerable, lightweight fake e-commerce website ("your one-stop shop for artisanal keyboards"). It presents a public storefront and a hidden administrative panel. The challenge is a three-stage chain that takes the solver from an anonymous web visitor to reading a root-owned flag on the host.
+**ShopStack** is a deliberately vulnerable, lightweight fake e-commerce site. Public storefront + hidden admin panel. A three-stage chain takes the solver from anonymous visitor to a root-owned flag. The three stages are distinct disciplines, and each hides its vector:
 
-The three stages are pedagogically distinct so the challenge teaches a recognizable, real-world kill chain rather than a single trick:
+1. **Second-order SQL injection** — the login form is *safe* (parameterized). The injectable point is the *registration* username, stored raw and later fired by a **change-password `UPDATE`**, letting the solver overwrite the admin account's password. Hard to spot because the injection point and the execution point are different requests.
+2. **Jinja2 SSTI → reverse shell as `web`** — no WAF (intentionally different from the "medium" version). The difficulty is the **reverse shell itself**: the box lacks `nc`/`ncat`/`socat`/`bash`, so the payloads solvers reach for first fail silently. The intended shell uses `python3` (the app runtime) — basic, but only once the solver enumerates what's actually present.
+3. **Custom SUID binary, non-announcing** — a root-owned SUID binary reads an arbitrary file as root, but prints **no usage/help** and there is **no breadcrumb**. The solver must find it via enumeration and analyze it (`strings`/`ltrace`) to learn its `-x <path>` primitive. No full root shell required.
 
-1. **Filtered SQL injection** authentication bypass — a naive blacklist filter blocks generic payloads, so the solver must craft a bypass tailored to *this* application (web foothold → admin).
-2. **Server-Side Template Injection (SSTI)** in Jinja2 (admin → remote code execution → reverse shell as an unprivileged user `web`).
-3. **Custom SUID binary abuse** — a root-owned SUID binary performs an arbitrary root file read (`functionbin -x /root/root.txt`), no full root shell required (unprivileged user → flag).
+Per-team instancing (GZCTF Dynamic Container) means each solver gets a throwaway box; state writes (needed for stage 1) are harmless across solvers.
 
-The design is deliberately constrained to a **single intended path** with all plausible shortcuts closed. This matters because the challenge is public-facing on GZCTF and the author intends to assist solvers; ambiguity or unintended solves would undermine both goals. Per-team instancing (GZCTF Dynamic Container) means each solver gets a throwaway box, so state-poisoning between solvers is not a concern.
+**Honest scope note on "AI-resistance":** removing the obvious tooling defeats *low-effort copy-paste* solving (the AI's first-suggested `nc`/`bash` payload fails on this box, forcing real enumeration). It does **not** make the box AI-proof — a solver who feeds the box's actual state to an AI can still get an adapted payload. Do not claim AI-impossibility; the design goal is raising the floor against no-effort solving.
 
 ---
 
 ## 2. Difficulty Rating & Target Solve Time
 
-- **Overall difficulty:** Medium (HTB "Easy"–"Medium" box equivalent). Raised from the baseline because Stage 1 is a filtered/crafted injection rather than a copy-paste `' OR 1=1-- `.
-- **Per-stage difficulty:**
-  - Stage 1 (filtered SQLi bypass): Medium. Generic payloads fail; the solver must fingerprint the blacklist and build a challenge-specific payload.
-  - Stage 2 (SSTI → RCE): Medium. Recognize `{{7*7}}=49`, then build a Jinja2 sandbox-escape RCE payload.
-  - Stage 3 (SUID read): Easy–Medium. Local enumeration (`find / -perm -4000`) + reading the binary's `-x` usage; the `su -l` breadcrumb lowers difficulty.
-- **Target solve time:** 60–120 minutes for a solver comfortable with web exploitation. This is a "learn the chain" challenge, not a rabbit-hole marathon.
+- **Overall:** Hard.
+- **Per-stage:**
+  - Stage 1 (second-order SQLi): Hard to *identify* (injection fires in a different request than where it's planted); basic SQL to exploit once seen.
+  - Stage 2 (SSTI → reverse shell): SSTI itself is medium; the **reverse shell is the hard part** because obvious tools are absent — solver must enumerate and use `python3`.
+  - Stage 3 (non-announcing SUID): Hard to *notice/understand* (no hint, no usage string); basic file-read once analyzed.
+- **Target solve time:** 2–4 hours for a competent solver. Each stage has a genuine "stuck until you see the trick" moment; none is a blind guessing game.
 
 ---
 
 ## 3. Full Attack Chain — Stage by Stage
 
-### Stage 1 — Filtered SQL Injection → Admin Panel
+### Stage 1 — Second-Order SQL Injection → Admin Account Takeover
 
-- **What the solver sees:** A storefront with a `/login` page (username + password). An `/admin` route redirects unauthenticated users back to login. Submitting an obvious injection like `' OR 1=1-- ` returns a generic "invalid input" / "login failed" — the payload is silently blocked by a filter. This is the key signal that the field is injectable but guarded.
-- **What the solver does:** Fingerprints the blacklist by testing which tokens are rejected (spaces, `=`, `OR`, `--`). Realizing generic payloads are filtered, they craft a bypass using tokens the filter misses — SQLite inline comments `/**/` instead of spaces, an unterminated `/*` instead of `--`, `UNION SELECT` to pull the admin row, and `>` instead of `=`. A working payload logs them in as admin.
-- **What the solver gets:** A valid authenticated admin session (session cookie) and access to `/admin`.
+- **Sees:** A storefront with `/login`, `/register`, and (after login) a `/account` page with a "change password" function. `/admin` redirects unauthenticated users away. Injecting at `/login` does nothing — it's parameterized.
+- **Does:** Registers a normal account and probes. Realizes login is safe but the **username chosen at registration is stored verbatim**. Registers a second account with a crafted username (e.g. `admin'-- `), logs into *that* account, and uses **change password** — which runs `UPDATE users SET password='<new>' WHERE username='<stored-username>'`. The stored `admin'-- ` makes the `UPDATE` target the **admin row**, overwriting the admin's password with one the solver controls.
+- **Gets:** Logs in as `admin` with the new password → access to `/admin`.
 
 ### Stage 2 — Jinja2 SSTI → Reverse Shell (`web`)
 
-- **What the solver sees:** Inside `/admin`, a "Store Announcement" (banner/email template) feature that renders a live preview of what the admin types.
-- **What the solver does:** Enters `{{7*7}}` and observes `49` in the preview — confirming server-side Jinja2 evaluation via `render_template_string()`. They then submit a Jinja2 sandbox-escape payload reaching an OS command primitive (e.g. `cycler.__init__.__globals__` → `os.popen`) and launch a reverse shell to their listener.
-- **What the solver gets:** An interactive reverse shell as the unprivileged user **`web`** (confirmed via `id`), **not** root.
+- **Sees:** In `/admin`, a "Store Announcement" template feature rendering a live preview of admin input.
+- **Does:** Confirms SSTI with `{{7*7}}` → `49`. Builds a Jinja2 sandbox-escape to OS command execution. Tries a standard `nc`/`bash` reverse shell — **it fails** (those binaries aren't on the box). Enumerates available interpreters (or infers from the stack) and uses a **`python3` reverse shell** to their listener.
+- **Gets:** Interactive shell as **`web`** (via `id`), not root.
 
-### Stage 3 — SUID Binary → Root File Read → Flag
+### Stage 3 — Non-Announcing SUID Binary → Root File Read → Flag
 
-- **What the solver sees:** As `web`, `cat /root/root.txt` is denied. `find / -perm -4000 -type f 2>/dev/null` reveals a non-standard root-owned SUID binary at `/usr/local/bin/functionbin`. Running `su -l` surfaces a stderr error that **names the binary** (intended breadcrumb from a broken wrapper in `web`'s shell profile).
-- **What the solver does:** Inspects usage (`functionbin` with no args prints `usage: functionbin -x <path>`), learns it reads an arbitrary file as root, and runs:
+- **Sees:** As `web`, `cat /root/root.txt` is denied. There is **no hint** and `su -l` reveals nothing special. Enumerating SUID binaries (`find / -perm -4000 -type f 2>/dev/null`) surfaces a non-standard root-owned binary, e.g. `/usr/local/bin/functionbin`, which prints **nothing useful** when run.
+- **Does:** Analyzes it — `strings /usr/local/bin/functionbin` (or `ltrace`) reveals it opens a path passed via a `-x` argument. Runs:
   ```
   functionbin -x /root/root.txt
   ```
-- **What the solver gets:** The contents of `/root/root.txt` — the flag. **No full root shell is required**; the arbitrary-read primitive alone suffices.
+- **Gets:** The flag. No full root shell needed.
 
 ---
 
 ## 4. Vulnerability Details Per Stage (pseudocode level)
 
-> The build agent implements real, working versions. Each vulnerable line must carry a comment: `# INTENTIONALLY VULNERABLE: <reason>`.
+> Build agent implements real, working versions. Each vulnerable line carries `# INTENTIONALLY VULNERABLE: <reason>`.
 
-### Stage 1 — Filtered SQLi (blacklist + unsafe query construction)
-
-```
-# INTENTIONALLY VULNERABLE: naive blacklist filter + string-concatenated SQL
-BLACKLIST = [" ", "=", "--", "or"]   # case-insensitive substring match
-
-def filtered(s):
-    low = s.lower()
-    return any(tok in low for tok in BLACKLIST)
-
-username = request.form["username"]
-password = request.form["password"]
-
-if filtered(username):
-    return render("login.html", error="invalid input")   # blocks generic payloads
-
-# INTENTIONALLY VULNERABLE: input concatenated directly into SQL after a weak filter
-query = "SELECT id, username, is_admin FROM users " \
-        "WHERE username = '" + username + "' AND password = '" + password + "'"
-row = db.execute(query).fetchone()   # db opened READ-ONLY (see §9)
-if row:
-    session["user_id"] = row["id"]
-    session["is_admin"] = row["is_admin"]
-```
-
-- **The flaw is the concatenation; the filter is only a speed bump.** The blacklist blocks spaces, `=`, the `OR` keyword, and `--` comments — which kills copy-paste payloads — but misses SQLite inline comments (`/**/`), unterminated block comments (`/*` runs to EOF in SQLite), `UNION`, and `>`.
-- **Representative intended payload (username field):**
-  ```
-  '/**/UNION/**/SELECT/**/id,username,is_admin/**/FROM/**/users/**/WHERE/**/is_admin>0/*
-  ```
-  This makes the query:
-  ```
-  SELECT id, username, is_admin FROM users WHERE username = ''/**/UNION/**/SELECT/**/id,username,is_admin/**/FROM/**/users/**/WHERE/**/is_admin>0/*' AND password = '...'
-  ```
-  The first SELECT matches nothing (`username=''`); the UNION returns the admin row; the trailing `/*` comments the rest to end-of-input. Session is set to admin.
-- **Build agent must verify:** generic payloads (`' OR 1=1-- `, `admin'-- `) are rejected by the filter, AND a crafted payload of the above class succeeds. The exact blacklist tokens may be tuned, but the property must hold: generic fails, a challenge-specific craft works, and it is solvable.
-- The DB connection is opened **read-only** (`file:...?mode=ro`, `PRAGMA query_only=1`), so injection can `SELECT`/`UNION` but cannot `UPDATE`/`INSERT`/`DROP`.
-- *(Optional variant, not required: a "second-order" version where a payload stored at registration is later used unsanitized in an admin-side query. Filtered login injection is the default because it is simpler to build and test deterministically.)*
-
-### Stage 2 — SSTI (template rendered from user input)
+### Stage 1 — Second-order SQLi (safe login, injectable stored username, unsafe UPDATE)
 
 ```
-# INTENTIONALLY VULNERABLE: attacker-controlled string passed to render_template_string
+# LOGIN IS SAFE — parameterized on purpose, to force the second-order route.
+row = db.execute(
+    "SELECT id, username, is_admin FROM users WHERE username = ? AND password = ?",
+    (username, password)
+).fetchone()
+
+# REGISTRATION stores the username RAW (this is the planted injection point).
+# INTENTIONALLY VULNERABLE: attacker-chosen username persisted without sanitization.
+db.execute("INSERT INTO users (username, password, is_admin) VALUES (?, ?, 0)",
+           (chosen_username, chosen_password))   # value is parameterized here (stored verbatim)…
+
+# CHANGE PASSWORD fires the stored payload.
+# INTENTIONALLY VULNERABLE: stored username concatenated into an UPDATE.
+stored = current_user["username"]                 # e.g.  admin'--
+q = "UPDATE users SET password = '" + new_password + "' WHERE username = '" + stored + "'"
+db.execute(q); db.commit()
+```
+
+- **Why it's second-order:** the payload is *planted* at registration (no visible effect) and *executes* later during change-password. `stored = admin'-- ` turns the UPDATE into
+  `UPDATE users SET password='<new>' WHERE username='admin'-- '`, overwriting the admin password.
+- **Intended flow:** register username `admin'-- ` → log in as that user → change password to `pwned` → log in as `admin` / `pwned`.
+- **Requires a WRITABLE DB** (users table). This is the intended write path; see §9 for how first-order paths stay closed.
+- Build agent must verify: login is NOT first-order injectable; the registration→change-password path DOES take over the admin account.
+
+### Stage 2 — SSTI (unfiltered) + hardened reverse shell
+
+```
+# INTENTIONALLY VULNERABLE: attacker-controlled string to render_template_string
 @app.route("/admin/announcement", methods=["POST"])
 @admin_required
 def announcement_preview():
-    tpl = request.form["announcement"]           # attacker-controlled
-    rendered = render_template_string(tpl)        # Jinja2 evaluates it server-side
-    return render_template("admin.html", preview=rendered)
+    tpl = request.form["announcement"]
+    return render_template("admin.html", preview=render_template_string(tpl))
 ```
 
-- `render_template_string` on raw user input is the flaw. `{{7*7}}` → `49` confirms.
-- Guarded by `@admin_required`, so reachable **only after Stage 1**. This ordering is deliberate — SSTI must not be reachable pre-auth.
+- `{{7*7}}` → `49` confirms. SSTI has **no WAF** (deliberate design difference).
+- **Reverse-shell hardening is environmental, not code:** the image (python:3-slim) ships **without `nc`, `ncat`, `socat`, `bash`, `curl`, `wget`**. Therefore:
+  - `nc -e …`, `bash -i >& /dev/tcp/…`, `sh` + `/dev/tcp` (dash has no `/dev/tcp`) all FAIL.
+  - **Intended solution:** a `python3` reverse shell (python3 is present as the runtime), e.g. the standard `socket`+`subprocess`+`pty` one-liner.
+- Build agent must NOT add `nc`/`bash`/`socat` to the image. Must verify: a python3 reverse-shell payload via SSTI lands a shell as `web`; a representative `nc`/`bash` payload does not work.
 
-### Stage 3 — SUID arbitrary-read binary (C)
+### Stage 3 — Non-announcing SUID arbitrary-read binary (C)
 
 ```
-/* INTENTIONALLY VULNERABLE: SUID-root binary performs arbitrary file read with EUID 0 */
+/* INTENTIONALLY VULNERABLE: SUID-root binary reads an arbitrary file as EUID 0. */
+/* Non-announcing: prints NO usage/help; silent or generic error on wrong args. */
 int main(int argc, char **argv) {
-    /* usage: functionbin -x <path>  -> print <path> to stdout as root */
     if (argc == 3 && strcmp(argv[1], "-x") == 0) {
-        /* does NOT drop privileges; opens argv[2] while EUID == 0 */
-        FILE *f = fopen(argv[2], "r");
-        if (!f) { perror("functionbin"); return 1; }
+        FILE *f = fopen(argv[2], "r");            /* opened while EUID == 0; no priv drop */
+        if (!f) return 1;                          /* silent failure, no perror */
         char buf[4096]; size_t n;
         while ((n = fread(buf, 1, sizeof buf, f)) > 0) fwrite(buf, 1, n, stdout);
-        fclose(f);
-        return 0;
+        fclose(f); return 0;
     }
-    fprintf(stderr, "usage: functionbin -x <path>\n");
-    return 2;
+    return 2;                                       /* NO usage string printed */
 }
 ```
 
-- Binary is `chown root:root` + `chmod u+s` (mode `4755`). It never drops privileges before `fopen`, so the read happens as root.
-- Intended use is the read primitive only; any other invocation errors with the usage line (the author's "one function that works, rest fail" concept).
-
-### Stage 3 breadcrumb — broken `su -l` wrapper
-
-```
-# In /home/web/.profile (or .bashrc):
-# INTENTIONALLY a breadcrumb: emit a stderr hint naming functionbin on login / su -l
-[ -x /usr/local/bin/functionbin ] && echo "notice: functionbin present; run 'functionbin' for usage" 1>&2
-```
-
-- Observable behavior is fixed: `su -l` (or logging in as `web`) must surface a stderr message naming `functionbin`, nudging toward the SUID binary **without** revealing the `-x /root/root.txt` answer.
-- Must NOT be wired into PAM (a bad PAM edit can lock the container). Shell profile / MOTD / login banner only.
+- `chown root:root` + `chmod u+s` (mode `4755`). Never drops privileges before `fopen`.
+- **No usage output** → solver must `strings`/`ltrace`/experiment to discover the `-x <path>` primitive. The `-x` token and the read behavior must be discoverable via `strings` (do not obfuscate strings away).
+- **NO breadcrumb.** Remove any `su -l` / shell-profile / MOTD hint that names the binary. `su -l` behaves normally and reveals nothing.
+- Synergy note: because the binary is non-announcing, a solver cannot blind-fire `functionbin -x /root/root.txt` through SSTI without first knowing the syntax — which effectively requires a real shell to analyze the binary. This keeps Stage 2 (the reverse shell) necessary in practice.
 
 ---
 
@@ -157,40 +138,38 @@ int main(int argc, char **argv) {
 
 ```
 shopstack/
-├── DESIGN.md                 # This blueprint (already present).
+├── DESIGN.md
 ├── app/
-│   ├── app.py                # Flask app: filtered SQLi login, admin panel, SSTI announcement sink.
-│   ├── db.py                 # Read-only SQLite connection helper (mode=ro, query_only=1).
-│   ├── seed.sql              # Schema + admin user row. No guessable extra creds.
-│   ├── requirements.txt      # Flask, gunicorn — pinned. Nothing else unless justified.
+│   ├── app.py                # Flask: SAFE login, register (stores raw username),
+│   │                         #        change-password (unsafe UPDATE), admin SSTI sink.
+│   ├── db.py                 # SQLite helper. WRITABLE users table (needed for 2nd-order).
+│   ├── seed.sql              # Schema + admin row (random password). No guessable creds.
+│   ├── requirements.txt      # Flask, gunicorn — pinned.
 │   ├── templates/
-│   │   ├── base.html         # Shared layout / storefront chrome.
-│   │   ├── index.html        # Public storefront (product listing, flavor only).
-│   │   ├── login.html        # Login form (filtered SQLi sink behind it).
-│   │   └── admin.html        # Admin panel with the "Store Announcement" SSTI field + preview.
-│   └── static/
-│       └── style.css         # Minimal CSS. No build step, no JS framework.
+│   │   ├── base.html
+│   │   ├── index.html        # Storefront (flavor).
+│   │   ├── login.html        # Safe/parameterized login.
+│   │   ├── register.html     # Registration (username stored raw = planted sink).
+│   │   ├── account.html      # Change-password form (fires the 2nd-order UPDATE).
+│   │   └── admin.html        # Admin panel + "Store Announcement" SSTI field + preview.
+│   └── static/style.css      # Minimal CSS. No JS framework.
 ├── privesc/
-│   ├── functionbin.c         # SUID arbitrary-read binary source (-x <path>).
-│   └── Makefile              # Builds functionbin.
-├── entrypoint.sh             # Runtime: plant flags, fix perms/SUID, drop to web, start gunicorn.
-├── Dockerfile                # python:3-slim build. NON-root web user. Builds functionbin. NO EXPOSE.
-├── docker-compose.yml        # LOCAL testing only (not used by GZ::CTF). Injects a test GZCTF_FLAG.
-└── SOLVE.md                  # (Produced later by the solve/QA agent, not the build agent.)
+│   ├── functionbin.c         # Non-announcing SUID arbitrary-read binary (-x <path>).
+│   └── Makefile
+├── entrypoint.sh             # Plant flags, fix perms/SUID, drop to web, start gunicorn.
+├── Dockerfile                # python:3-slim, non-root web, build functionbin, NO EXPOSE,
+│                             # NO nc/bash/socat/curl/wget added.
+├── docker-compose.yml        # LOCAL testing only.
+└── SOLVE.md                  # Produced later by the solve/QA agent.
 ```
-
-- No SPA, no bundler, no Node. Server-rendered Jinja2 + one CSS file only.
-- `docker-compose.yml` exists **solely** for local build/test; production runs via GZ::CTF orchestration pulling the image from the registry (see §8).
 
 ---
 
 ## 6. Flag Handling
 
-- **Root flag:** GZ::CTF injects a per-team flag as the environment variable **`GZCTF_FLAG`** at container start. `entrypoint.sh` reads it and writes it to **`/root/root.txt`**:
-  - Owner `root:root`, mode `0400`. Written **before** privileges are dropped to `web`.
-  - If `GZCTF_FLAG` is unset (local testing), fall back to `flag{local_test_placeholder}` so the box still builds and runs.
-- **User flag (`user.txt`):** `/home/web/user.txt`, owner `web:web`, mode `0644`, readable once the reverse shell lands. A static, non-secret foothold marker (e.g. `SHOPSTACK{web_foothold_reached}`). **Not** the scored flag by default and must **never** contain the real `GZCTF_FLAG`.
-- **Never** hardcode the real flag in the image, source, or seed data. Only path: `GZCTF_FLAG` → `/root/root.txt` at runtime.
+- **Root flag:** GZ::CTF injects `GZCTF_FLAG` at start. `entrypoint.sh` writes it to `/root/root.txt` (`root:root`, `0400`) BEFORE dropping to `web`. If unset (local test), fall back to `flag{local_test_placeholder}`.
+- **User flag:** `/home/web/user.txt` (`web:web`, `0644`), static non-secret marker (e.g. `SHOPSTACK{web_foothold_reached}`). Never the real flag.
+- Never hardcode the real flag anywhere. Only path: `GZCTF_FLAG` → `/root/root.txt` at runtime.
 
 ---
 
@@ -198,143 +177,151 @@ shopstack/
 
 | Path / Object                     | Owner        | Mode   | SUID | Notes                                                                 |
 |-----------------------------------|--------------|--------|------|----------------------------------------------------------------------|
-| App process (gunicorn)            | `web`        | —      | No   | Serves Flask; never runs as root.                                    |
-| `/usr/local/bin/functionbin`      | `root:root`  | `4755` | **Yes** | The intended privesc primitive (arbitrary root read).            |
-| `/root/root.txt`                  | `root:root`  | `0400` | No   | Scored flag; unreadable by `web` except via `functionbin -x`.       |
-| `/home/web/user.txt`              | `web:web`    | `0644` | No   | Foothold marker; static, non-secret.                                |
-| `/home/web/.profile` (breadcrumb) | `web:web`    | `0644` | No   | Emits stderr hint naming `functionbin`. Not PAM.                    |
-| App source under `/app`           | `root:root`  | `0644` | No   | Owned by root, readable by `web`; `web` cannot modify app code.      |
-| SQLite DB file                    | `root:root`  | `0644` | No   | Opened read-only by the app; `web` cannot write it.                 |
-| Everything else                   | as base image| —      | No   | Only ONE non-standard SUID binary must exist beyond system defaults.|
+| App process (gunicorn)            | `web`        | —      | No   | Serves Flask; never root.                                            |
+| SQLite DB file                    | `web:web`    | `0644` | No   | **Writable by app** (users table) — required for 2nd-order stage 1.  |
+| `/usr/local/bin/functionbin`      | `root:root`  | `4755` | **Yes** | Non-announcing arbitrary root read.                              |
+| `/root/root.txt`                  | `root:root`  | `0400` | No   | Scored flag; only via `functionbin -x`.                             |
+| `/home/web/user.txt`              | `web:web`    | `0644` | No   | Foothold marker.                                                    |
+| App source under `/app`           | `root:root`  | `0644` | No   | Root-owned, readable by `web`; `web` can't modify app code (only DB).|
+| No breadcrumb file                | —            | —      | —    | Any `su -l`/MOTD hint that names functionbin is REMOVED.            |
 
 **Invariant:** `find / -perm -4000 -type f 2>/dev/null` yields exactly one non-standard entry: `functionbin`.
+**Note:** the DB is writable but app *source* is not; a solver can overwrite the admin password (intended) but cannot edit app code.
 
 ---
 
 ## 8. Deployment — Phase 1 (local Docker) then Phase 2 (Harbor + GZ::CTF)
 
-> Build and fully verify **Phase 1** before doing anything in Phase 2. Phase 2 requires **no code changes** — only a registry push and panel config.
+> Fully verify Phase 1 before Phase 2. Phase 2 requires no code changes.
 
-### 8.1 PHASE 1 — Local build & test (the immediate goal, no registry needed)
-
-This is what "done" means for the first pass: the image builds and the full three-stage chain is solvable on the author's own machine.
-
+### 8.1 PHASE 1 — Local build & test (the immediate goal)
 ```
-# from the shopstack/ directory
 docker build -t shopstack:local .
-
-# run locally with a fake flag to test the full chain end-to-end
 docker run --rm -p 8080:80 -e GZCTF_FLAG='flag{local_test}' shopstack:local
-# then browse http://localhost:8080 and solve it yourself:
-#   Stage 1: craft the filtered-SQLi payload -> reach /admin
-#   Stage 2: {{7*7}} -> 49 -> SSTI reverse shell as web
-#   Stage 3: functionbin -x /root/root.txt -> see flag{local_test}
+# Solve end-to-end at http://localhost:8080:
+#   Stage 1: register username `admin'-- ` -> change password -> log in as admin
+#   Stage 2: {{7*7}} -> 49 -> SSTI -> python3 reverse shell as web (nc/bash won't work)
+#   Stage 3: find SUID -> analyze functionbin -> functionbin -x /root/root.txt
 ```
+Phase 1 done when every §11 item passes locally.
 
-Optional convenience for local testing only (NOT used by GZ::CTF):
-```
-# docker-compose.yml sets GZCTF_FLAG and the port map for repeatable local runs
-docker compose up --build
-```
-
-Phase 1 is complete when every item in §11 (Acceptance Criteria) passes locally.
-
-### 8.2 PHASE 2 — Harbor registry (do later, config only)
-
-Harbor is a private Docker registry (a self-hosted Docker Hub) that GZ::CTF pulls images from. Once Phase 1 works, the same image is pushed as-is — no rebuild of logic.
-
-**Builder / devops** (whoever has Harbor access — may be the author later, or someone else):
+### 8.2 PHASE 2 — Harbor registry (later, config only)
+Harbor = private Docker registry GZ::CTF pulls from. Same image, no rebuild:
 ```
 docker build -t <harbor-host>/<project>/shopstack:latest .
-docker login <harbor-host>            # Harbor username/password or robot account
+docker login <harbor-host>            # Harbor user/pass or robot account
 docker push <harbor-host>/<project>/shopstack:latest
 ```
-Hand the image path `<harbor-host>/<project>/shopstack:latest` to the GZCTF admin.
+Hand `<harbor-host>/<project>/shopstack:latest` to the GZCTF admin.
+One-time platform prereq: GZ::CTF needs a Harbor **robot account** / pull secret configured; if pulls fail with auth errors, check that.
 
-**One-time prerequisite (platform setup, not per-challenge):** GZ::CTF needs credentials to pull from Harbor — typically a Harbor **robot account** set as a registry/pull secret in the GZ::CTF deployment. If image pulls fail with an auth error, check this. Platform-admin task, outside the challenge repo.
+### 8.3 PHASE 2 — GZ::CTF challenge config (panel — type: Dynamic Container)
 
-### 8.3 PHASE 2 — GZ::CTF challenge config (enter in the admin panel — type: **Dynamic Container**)
+| Field           | Value                                       | Notes                                                     |
+|-----------------|---------------------------------------------|-----------------------------------------------------------|
+| Challenge type  | Dynamic Container                           | Per-team isolated instance.                               |
+| Container image | `<harbor-host>/<project>/shopstack:latest`  | Paste from 8.2.                                           |
+| `ExposePort`    | `80`                                        | App on 80 internally. **No `EXPOSE` in Dockerfile.**     |
+| `MemoryLimit`   | `128` (MB)                                  | Lightweight.                                              |
+| `CPUCount`      | `1`                                         | —                                                        |
+| `StorageLimit`  | `256` (MB)                                  | —                                                        |
+| Network mode    | **Isolated**                                | Hands out a shell; block egress/pivots.                  |
+| Flag template   | `flag{[TEAM_HASH]}`                         | Per-team flag → injected as `GZCTF_FLAG`.                |
 
-| Field                | Value                                  | Rationale                                                              |
-|----------------------|----------------------------------------|-----------------------------------------------------------------------|
-| Challenge type       | Dynamic Container                      | Per-team isolated instance; kills cross-solver griefing & flag sharing.|
-| Container image      | `<harbor-host>/<project>/shopstack:latest` | Image path from 8.2. This is what the admin pastes in.            |
-| `ExposePort`         | `80`                                   | App listens on 80 inside the container. **Do NOT `EXPOSE` in Dockerfile** — GZ::CTF maps it to a random host port. |
-| `MemoryLimit`        | `128` (MB)                             | Lightweight app.                                                      |
-| `CPUCount`           | `1`                                    | No heavy compute.                                                    |
-| `StorageLimit`       | `256` (MB)                             | Slim image + SQLite.                                                 |
-| Network mode         | **Isolated**                           | Challenge hands out a shell; prevent egress / pivots.                |
-| Flag template        | `flag{[TEAM_HASH]}`                    | Per-team unique flag via GZ::CTF `[TEAM_HASH]`; injected as `GZCTF_FLAG`.|
-
-- **Do not** set `no-new-privileges` — it would neutralize the SUID privesc and break the intended path.
-- Because the image already reads `GZCTF_FLAG` (with a local fallback) and listens on port 80 with no `EXPOSE`, moving from Phase 1 to Phase 2 requires **no image change** — just push and configure.
+- **Do not** set `no-new-privileges` (breaks the SUID privesc).
+- Moving Phase 1 → Phase 2 needs no image change: `GZCTF_FLAG` fallback + port-80/no-EXPOSE already baked in.
 
 ---
 
 ## 9. Hardening / Anti-Unintended-Solve Checklist
 
 **Global**
-- [ ] `DEBUG=False`, served via **gunicorn**, never the Flask dev server. → Closes the Werkzeug debugger-console RCE (classic Stage-2 shortcut).
-- [ ] **No default / guessable credentials.** Admin password is random and never needed; only the SQLi gets in. → Prevents skipping Stage 1.
-- [ ] App runs as **non-root `web`**; app source owned by root, not writable by `web`. → Prevents app tampering to shortcut later stages.
-- [ ] **Only one** non-standard SUID binary (`functionbin`). → Prevents an alternate GTFOBins privesc.
-- [ ] **Isolated network mode.** → Prevents using the shell to reach the internet or other infra.
-- [ ] Pin dependency versions; only `Flask` + `gunicorn`. → Reduces incidental vulnerable surface.
+- [ ] `DEBUG=False`, gunicorn (never Flask dev server). → No Werkzeug debug-console RCE.
+- [ ] App runs as non-root `web`; app source root-owned and not writable by `web`. → Only the DB is writable, and only as the intended 2nd-order vector.
+- [ ] Exactly one non-standard SUID binary (`functionbin`). → No alternate GTFOBins privesc.
+- [ ] Isolated network mode. → No egress shortcuts.
+- [ ] Deps pinned; only Flask + gunicorn. → Minimal surface.
+- [ ] **No `nc`/`ncat`/`socat`/`bash`/`curl`/`wget` in the image.** → Forces the python3 reverse shell; defeats copy-paste payloads.
 
-**Stage 1 (filtered SQLi)**
-- [ ] Blacklist blocks generic payloads (spaces, `=`, `OR`, `--`) → forces a challenge-specific craft, not copy-paste. → Delivers the "payload crafted for this challenge only" requirement.
-- [ ] SQLite opened **read-only** (`mode=ro`, `PRAGMA query_only=1`), DB file not writable by `web`. → Injection cannot `UPDATE`/`DROP`; defense-in-depth on top of per-team instancing.
-- [ ] Admin panel strictly gated by session set only via a successful login query. → No unauthenticated `/admin`.
-- [ ] Filter is a speed bump, NOT real protection — a crafted payload must remain reliably solvable. → Prevents Stage 1 becoming an unsolvable guessing game.
+**Stage 1 (second-order SQLi)**
+- [ ] Login is **parameterized** (no first-order injection). → Forces solvers to the second-order path.
+- [ ] Registration stores the username raw; change-password concatenates it into an UPDATE. → The single intended write/injection path.
+- [ ] No default/guessable admin password; admin password is random and only obtainable by overwriting it via the 2nd-order UPDATE. → Can't skip stage 1 by guessing.
+- [ ] DB writable for users table only; app source not writable. → Intended takeover works; code tampering does not.
 
-**Stage 2 (SSTI)**
-- [ ] SSTI sink **behind `@admin_required`**. → Not reachable pre-auth; enforces Stage 1 → 2 ordering.
-- [ ] No file-upload, `pickle`, `eval`, or command-injection sink elsewhere. → SSTI is the single intended RCE.
-- [ ] Reverse shell lands as `web`, never root. → Forces Stage 3.
+**Stage 2 (SSTI + reverse shell)**
+- [ ] SSTI sink behind `@admin_required`. → Not reachable pre-auth; enforces stage 1 → 2 ordering.
+- [ ] No file upload / `eval` / `pickle` / command-injection sink besides the SSTI. → SSTI is the single intended RCE.
+- [ ] Reverse shell lands as `web`, never root. → Forces stage 3.
+- [ ] Obvious reverse-shell tools absent (see Global). → python3 is the intended primitive.
 
-**Stage 3 (SUID)**
-- [ ] `functionbin` reads as EUID 0 and never drops privileges before `fopen`. → The intended primitive works.
-- [ ] `/root/root.txt` mode `0400 root:root`. → Not directly readable by `web`.
-- [ ] Breadcrumb via shell profile / MOTD only, **never PAM**. → Won't lock the box; names the binary without giving the exact answer.
-- [ ] No `sudo` misconfig, no writable cron, no writable `PATH` dirs, no other SUID. → `functionbin -x` is the single intended privesc.
-
----
-
-## 10. Hints (author-published, escalating — one per stage)
-
-**Stage 1**
-1. "The staff entrance trusts what you type a little too literally — but it's learned to slam the door on the usual tricks. The obvious key won't turn; you'll have to file down a new one that this particular lock doesn't recognize as a threat."
-
-**Stage 2**
-2. "Admins can preview announcements before they go out. The preview renders everything you write. Try a little math: does `{{7*7}}` become `49`?"
-
-**Stage 3**
-3. "You're in, but not all the way. Look for something that runs with more power than you have (`find / -perm -4000 -type f 2>/dev/null`) and read its usage carefully — you may not need a full shell, just a good read. Stuck? Try logging in properly and read the error."
-
-> Publish hints progressively (locked / point-costed as the platform allows). Each hint points at the technique/location, never the exact payload.
+**Stage 3 (non-announcing SUID)**
+- [ ] `functionbin` reads as EUID 0, never drops privileges before `fopen`. → Primitive works.
+- [ ] Binary prints NO usage; `-x` discoverable via `strings`/analysis. → Real investigation required.
+- [ ] **No breadcrumb** anywhere (no `su -l`/MOTD/profile hint). → Difficulty is real; use a GZCTF platform hint as the safety net instead (see §10).
+- [ ] `/root/root.txt` is `0400 root:root`; no other SUID, no writable cron/PATH, no sudo misconfig. → `functionbin -x` is the single intended privesc.
+- [ ] Shortcut check: running `functionbin -x /root/root.txt` directly via SSTI is acceptable IF the solver discovered the syntax — but discovery requires analysis (non-announcing), so a shell remains necessary in practice.
 
 ---
 
-## 11. Acceptance Criteria (build is verified against these)
+## 10. Hints (published on GZ::CTF as the safety net — the in-box breadcrumb is removed)
 
-The implementation is correct **only if all pass** on a freshly built container:
+Because Stage 3's in-box breadcrumb is gone, provide the nudge as **platform hints** (locked/point-costed) so stuck solvers can still progress without trivializing the box:
 
-1. **Builds clean:** `docker build` completes with no errors; python:3-slim base; lightweight.
-2. **No EXPOSE:** the Dockerfile contains no `EXPOSE`; app listens on port 80 internally.
-3. **Stage 1 filter works:** generic payloads (`' OR 1=1-- `, `admin'-- `) are rejected as invalid input.
-4. **Stage 1 crafted bypass works:** a challenge-specific payload of the documented class (e.g. the `/**/`+`UNION`+`/*` example) authenticates as admin and reaches `/admin`.
-5. **Stage 1 negative:** a normal wrong username/password is rejected; no default creds work.
-6. **Stage 2 confirm:** submitting `{{7*7}}` to the announcement field renders `49`.
-7. **Stage 2 RCE:** an SSTI payload executes an OS command; a reverse-shell payload yields an interactive shell.
-8. **Foothold identity:** the reverse shell reports `uid=…(web)` — **not** root. `/home/web/user.txt` is readable.
-9. **Stage 3 blocked-then-unlocked:** as `web`, `cat /root/root.txt` → permission denied; `functionbin -x /root/root.txt` → prints the flag.
-10. **Breadcrumb:** `su -l` (or a `web` login) surfaces a stderr message naming `functionbin`.
-11. **SUID inventory:** `find / -perm -4000 -type f 2>/dev/null` lists exactly one non-standard binary, `functionbin` (`root:root`, `4755`).
-12. **Flag plumbing:** `GZCTF_FLAG=flag{unit_test_value}` at container start results in that exact value in `/root/root.txt` (`root:root`, `0400`), retrievable via `functionbin -x`.
-13. **No debug console:** the Werkzeug debugger is not reachable (DEBUG=False, gunicorn).
-14. **Read-only DB:** an injected write attempt does not alter the database (connection is read-only).
-15. **No unintended RCE:** no file upload, `eval`, `pickle`, or command-injection sink besides the intended SSTI.
-16. **Single path holds:** the build report confirms each unintended path in §9 is closed, with the command/output used to verify.
-17. **Local run smoke test:** `docker run -e GZCTF_FLAG=... -p 8080:80` serves the storefront and the full chain is solvable end-to-end locally.
+1. **Stage 1:** "The front door is solid. But the shop remembers what you call yourself when you sign up — and uses that name again later, somewhere it shouldn't. What you plant at registration may bloom elsewhere."
+2. **Stage 2:** "The preview renders everything — `{{7*7}}` should become `49`. Getting a shell is the real trick: your favorite tool probably isn't installed here. What language is this app *written* in? Use that."
+3. **Stage 3:** "You're in as a limited user. Something on this box runs with more power than you (`find / -perm -4000 -type f 2>/dev/null`). It won't tell you how to use it — you'll have to look inside (`strings`) and figure out what argument makes it read a file."
 
-> On completion, the build agent outputs a report mapping every criterion above to the command run and its observed result. Any deviation from this DESIGN.md must be flagged, not silently resolved.
+> Each hint points at technique/location, never the exact payload. Publish progressively.
+
+---
+
+## 11. Acceptance Criteria (verified before ship)
+
+On a freshly built container:
+
+1. Builds clean; python:3-slim; **no `EXPOSE`**; **no nc/bash/socat/curl/wget** present (`which nc bash socat` → not found).
+2. **Stage 1 login is safe:** first-order payloads at `/login` (`admin'-- `, `' OR 1=1-- `) do NOT bypass auth.
+3. **Stage 1 second-order works:** registering username `admin'-- `, then changing that account's password, overwrites the admin password; logging in as `admin` with the new password reaches `/admin`.
+4. **Stage 1 negative:** a normal wrong login is rejected; no default creds work.
+5. **Stage 2 confirm:** `{{7*7}}` in the announcement field renders `49`.
+6. **Stage 2 obvious-shell fails:** a representative `nc`/`bash` reverse-shell payload does NOT yield a shell (tools absent).
+7. **Stage 2 intended shell works:** a `python3` reverse-shell payload via SSTI lands an interactive shell.
+8. **Foothold identity:** shell is `uid=…(web)`, NOT root; `/home/web/user.txt` readable.
+9. **Stage 3 non-announcing:** running `functionbin` with no/incorrect args prints NO usage string; `strings functionbin` reveals the `-x` primitive.
+10. **Stage 3 no breadcrumb:** `su -l` and login reveal nothing naming `functionbin`.
+11. **Stage 3 read works:** as `web`, `cat /root/root.txt` → denied; `functionbin -x /root/root.txt` → prints the flag.
+12. **SUID inventory:** exactly one non-standard SUID binary, `functionbin` (`root:root`, `4755`).
+13. **Flag plumbing:** `GZCTF_FLAG=flag{unit_test}` → that exact value in `/root/root.txt` (`root:root`, `0400`) and via `functionbin -x`.
+14. **No debug console:** Werkzeug debugger not reachable (DEBUG=False, gunicorn).
+15. **Write scope:** the app can UPDATE the users table (intended) but `web` cannot modify app source under `/app`.
+16. **No unintended RCE:** no upload/eval/pickle/command-injection sink besides the intended SSTI.
+17. **Single path holds:** build report confirms each §9 unintended path is closed, with command/output.
+18. **Local smoke test:** `docker run -e GZCTF_FLAG=... -p 8080:80` serves the storefront and the full 3-stage chain is solvable end-to-end locally.
+
+> Build agent outputs a report mapping every criterion to the exact command run and observed output. Any deviation from this DESIGN.md is flagged, not silently resolved.
+
+---
+
+## 12. Delta From the Existing Phase-1 Build (upgrade, don't rebuild)
+
+The prior build passed with filtered-UNION SQLi, a self-announcing SUID, and a breadcrumb. To upgrade it to this HARD spec, change ONLY the following; leave everything else intact:
+
+**Stage 1 — replace filtered-UNION with second-order:**
+- Make `/login` **parameterized/safe** (remove the blacklist filter entirely).
+- Add `/register` (stores the chosen username **raw**) and `/account` **change-password** that builds the `UPDATE … WHERE username='<stored>'` by concatenation (the new injectable sink). Add `register.html`, `account.html`.
+- Make the SQLite DB **writable** by `web` (reverse the old read-only mount / `query_only` setting).
+- Update seed: admin password random; ensure the admin row is targetable by username.
+
+**Stage 2 — keep SSTI, harden the shell environmentally:**
+- No code change to the SSTI sink. Ensure the Dockerfile does **not** install `nc`/`ncat`/`socat`/`bash`/`curl`/`wget` (remove them if the base or prior build added any). Confirm `python3` remains available. Intended payload becomes a python3 reverse shell.
+
+**Stage 3 — make the binary non-announcing and drop the breadcrumb:**
+- Edit `functionbin.c`: remove the `usage:` output; silent/generic failure on wrong args; keep the `-x <path>` read and the SUID behavior. Rebuild.
+- Remove the `su -l`/shell-profile/MOTD breadcrumb line from `entrypoint.sh` / `.profile`.
+
+**Docs/QA:**
+- Move the Stage-3 nudge from an in-box breadcrumb to a GZ::CTF platform hint (§10).
+- Re-run the solve/QA agent (Prompt 3) black-box against the upgraded image; confirm no unintended shortcut is easier than the intended chain, then re-verify all §11 criteria.
+
+Recommended: do this on a branch (e.g. `harder`) so the known-good Phase-1 image stays intact until QA passes.

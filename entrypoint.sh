@@ -4,7 +4,10 @@
 # permissions + SUID, then drops to the unprivileged `web` user to run gunicorn.
 set -eu
 
-DB_PATH="/app/shopstack.db"
+# DB lives in web's home so `web` can write it (registration + change-password).
+# App source under /app stays root-owned and NOT writable by web.
+DB_PATH="/home/web/shopstack.db"
+export SHOPSTACK_DB="$DB_PATH"
 
 # --- Root flag ---------------------------------------------------------------
 # GZ::CTF injects the per-team flag as $GZCTF_FLAG. Fall back to a placeholder for
@@ -36,8 +39,9 @@ sed -e "s/__ADMIN_PASSWORD__/${ADMIN_PW}/" \
     -e "s/__CUSTOMER_PASSWORD__/${CUSTOMER_PW}/" \
     /app/seed.sql | sqlite3 "$DB_PATH"
 
-# App source + DB owned by root, readable (not writable) by web.
-chown root:root "$DB_PATH"
+# DB owned by web so the app (running as web) can INSERT/UPDATE. The containing
+# directory /home/web is web-owned too, so SQLite can create its journal/WAL files.
+chown web:web "$DB_PATH"
 chmod 0644 "$DB_PATH"
 
 # Shared Flask session secret for all gunicorn workers (fresh per container).

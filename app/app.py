@@ -1,9 +1,11 @@
-"""ShopStack — deliberately vulnerable CTF web app.
+"""ShopStack — deliberately vulnerable CTF web app (HARD revision).
 
-Stage 1: filtered SQL injection auth bypass on /login.
+Stage 1: SECOND-ORDER SQL injection. /login is parameterized and safe. /register
+         stores the chosen username RAW. /account change-password concatenates that
+         stored username into an UPDATE, so a username registered as `admin'-- `
+         rewrites the admin account's password.
 Stage 2: Jinja2 SSTI via render_template_string on /admin/announcement.
 
-Both flaws are intentional and marked with `# INTENTIONALLY VULNERABLE`.
 Served in production by gunicorn with DEBUG disabled.
 """
 
@@ -23,16 +25,8 @@ from flask import (
 from db import get_db
 
 app = Flask(__name__)
-# Session signing key. Sourced from the environment so every gunicorn worker in a
-# container shares the same key (a per-process os.urandom() would make sessions
-# break across workers). entrypoint.sh sets SHOPSTACK_SECRET to a fresh random
-# value per container start; the fallback keeps local `python app.py` working.
+# Shared session secret across gunicorn workers (set per container in entrypoint.sh).
 app.secret_key = os.environ.get("SHOPSTACK_SECRET", os.urandom(32).hex())
-
-# INTENTIONALLY VULNERABLE: naive blacklist filter. Blocks the tokens used by
-# copy-paste payloads (spaces, '=', the OR keyword, '--' comments) but misses
-# SQLite inline comments (/**/), unterminated block comments (/*), UNION and '>'.
-BLACKLIST = [" ", "=", "--", "or"]
 
 PRODUCTS = [
     {"name": "Artisan Alpha", "desc": "Hand-lubed linear switches, walnut case.", "price": "189.00"},
@@ -44,10 +38,14 @@ PRODUCTS = [
 ]
 
 
-def filtered(s):
-    """Case-insensitive substring blacklist check."""
-    low = s.lower()
-    return any(tok in low for tok in BLACKLIST)
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("user_id"):
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+
+    return wrapper
 
 
 def admin_required(f):
@@ -73,27 +71,15 @@ def login():
     username = request.form.get("username", "")
     password = request.form.get("password", "")
 
-    # Filter is applied to the username field — the injection sink for this stage.
-    if filtered(username):
-        return render_template("login.html", error="invalid input")
-
-    # INTENTIONALLY VULNERABLE: user input concatenated directly into SQL after a
-    # weak blacklist. The concatenation is the real flaw; the filter is a speed bump.
-    query = (
-        "SELECT id, username, is_admin FROM users "
-        "WHERE username = '" + username + "' AND password = '" + password + "'"
-    )
-
+    # SAFE: parameterized query — first-order injection at /login does not work.
+    db = get_db()
     try:
-        db = get_db()
-        row = db.execute(query).fetchone()
-    except Exception:
-        return render_template("login.html", error="login failed")
+        row = db.execute(
+            "SELECT id, username, is_admin FROM users WHERE username = ? AND password = ?",
+            (username, password),
+        ).fetchone()
     finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+        db.close()
 
     if row:
         session["user_id"] = row["id"]
@@ -101,9 +87,67 @@ def login():
         session["is_admin"] = row["is_admin"]
         if row["is_admin"]:
             return redirect(url_for("admin"))
-        return redirect(url_for("index"))
+        return redirect(url_for("account"))
 
     return render_template("login.html", error="login failed")
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template("register.html")
+
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    if not username or not password:
+        return render_template("register.html", error="username and password required")
+
+    db = get_db()
+    try:
+        # INTENTIONALLY VULNERABLE: the username is stored RAW (no sanitization). The
+        # INSERT itself is parameterized, so the exact bytes — including quotes and
+        # `--` — are persisted verbatim, planting the second-order injection payload
+        # that /account later concatenates into an UPDATE.
+        db.execute(
+            "INSERT INTO users (username, password, is_admin) VALUES (?, ?, 0)",
+            (username, password),
+        )
+        db.commit()
+    except Exception:
+        return render_template("register.html", error="username already taken")
+    finally:
+        db.close()
+
+    return redirect(url_for("login"))
+
+
+@app.route("/account", methods=["GET", "POST"])
+@login_required
+def account():
+    if request.method == "GET":
+        return render_template("account.html", username=session.get("username"))
+
+    new_password = request.form.get("new_password", "")
+    stored_username = session.get("username", "")
+
+    # INTENTIONALLY VULNERABLE: the raw-stored username is concatenated directly into
+    # an UPDATE (second-order SQLi). A user registered as `admin'-- ` makes this:
+    #   UPDATE users SET password='<new>' WHERE username='admin'-- '
+    # which rewrites the admin row's password instead of the attacker's own.
+    query = (
+        "UPDATE users SET password = '" + new_password + "' "
+        "WHERE username = '" + stored_username + "'"
+    )
+    db = get_db()
+    try:
+        db.execute(query)
+        db.commit()
+    except Exception:
+        return render_template("account.html", username=stored_username, error="update failed")
+    finally:
+        db.close()
+
+    return render_template("account.html", username=stored_username, message="password updated")
 
 
 @app.route("/logout")
@@ -130,5 +174,4 @@ def announcement_preview():
 
 
 if __name__ == "__main__":
-    # Local dev only. Production uses gunicorn with DEBUG=False (see entrypoint.sh).
     app.run(host="0.0.0.0", port=80, debug=False)

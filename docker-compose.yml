@@ -5,6 +5,6 @@ services:
     build: .
     image: shopstack:local
     environment:
-      GZCTF_FLAG: "flag{local_test}"
+      GZCTF_FLAG: "ISAG{local_test}"
     ports:
       - "8080:80"

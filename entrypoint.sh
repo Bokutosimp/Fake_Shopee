@@ -17,7 +17,7 @@ export SHOPSTACK_DB="$DB_PATH"
 if [ -n "${GZCTF_FLAG:-}" ]; then
     FLAG="$GZCTF_FLAG"
 else
-    FLAG="flag{local_test_placeholder}"
+    FLAG="ISAG{local_test_placeholder}"
 fi
 printf '%s\n' "$FLAG" > /root/root.txt
 chown root:root /root/root.txt

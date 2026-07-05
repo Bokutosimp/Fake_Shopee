@@ -167,7 +167,7 @@ shopstack/
 
 ## 6. Flag Handling
 
-- **Root flag:** GZ::CTF injects `GZCTF_FLAG` at start. `entrypoint.sh` writes it to `/root/root.txt` (`root:root`, `0400`) BEFORE dropping to `web`. If unset (local test), fall back to `flag{local_test_placeholder}`.
+- **Root flag:** GZ::CTF injects `GZCTF_FLAG` at start. `entrypoint.sh` writes it to `/root/root.txt` (`root:root`, `0400`) BEFORE dropping to `web`. If unset (local test), fall back to `ISAG{local_test_placeholder}`.
 - **User flag:** `/home/web/user.txt` (`web:web`, `0644`), static non-secret marker (e.g. `SHOPSTACK{web_foothold_reached}`). Never the real flag.
 - Never hardcode the real flag anywhere. Only path: `GZCTF_FLAG` → `/root/root.txt` at runtime.
 
@@ -197,7 +197,7 @@ shopstack/
 ### 8.1 PHASE 1 — Local build & test (the immediate goal)
 ```
 docker build -t shopstack:local .
-docker run --rm -p 8080:80 -e GZCTF_FLAG='flag{local_test}' shopstack:local
+docker run --rm -p 8080:80 -e GZCTF_FLAG='ISAG{local_test}' shopstack:local
 # Solve end-to-end at http://localhost:8080:
 #   Stage 1: register username `admin'-- ` -> change password -> log in as admin
 #   Stage 2: {{7*7}} -> 49 -> SSTI -> python3 reverse shell as web (nc/bash won't work)
@@ -206,27 +206,31 @@ docker run --rm -p 8080:80 -e GZCTF_FLAG='flag{local_test}' shopstack:local
 Phase 1 done when every §11 item passes locally.
 
 ### 8.2 PHASE 2 — Harbor registry (later, config only)
-Harbor = private Docker registry GZ::CTF pulls from. Same image, no rebuild:
+Harbor = private Docker registry GZ::CTF pulls from. Same image, no rebuild.
+Registry host `registry.ce-isag.com`, project `isag-sf11` (per platform manual).
+Build for `linux/amd64` — the platform runs amd64 nodes:
 ```
-docker build -t <harbor-host>/<project>/shopstack:latest .
-docker login <harbor-host>            # Harbor user/pass or robot account
-docker push <harbor-host>/<project>/shopstack:latest
+docker build . --platform linux/amd64 -t registry.ce-isag.com/isag-sf11/shopstack:latest
+docker login registry.ce-isag.com    # account issued by the platform admin
+docker push registry.ce-isag.com/isag-sf11/shopstack:latest
 ```
-Hand `<harbor-host>/<project>/shopstack:latest` to the GZCTF admin.
+Or use the helper: `./build-push.sh [TAG]` (defaults to `latest`).
+Hand `registry.ce-isag.com/isag-sf11/shopstack:latest` to the GZCTF admin.
 One-time platform prereq: GZ::CTF needs a Harbor **robot account** / pull secret configured; if pulls fail with auth errors, check that.
+Note: if a push stalls, retry after a moment — the registry sits behind Cloudflare rate limits (per platform manual).
 
 ### 8.3 PHASE 2 — GZ::CTF challenge config (panel — type: Dynamic Container)
 
 | Field           | Value                                       | Notes                                                     |
 |-----------------|---------------------------------------------|-----------------------------------------------------------|
 | Challenge type  | Dynamic Container                           | Per-team isolated instance.                               |
-| Container image | `<harbor-host>/<project>/shopstack:latest`  | Paste from 8.2.                                           |
+| Container image | `registry.ce-isag.com/isag-sf11/shopstack:latest` | Paste from 8.2.                                      |
 | `ExposePort`    | `80`                                        | App on 80 internally. **No `EXPOSE` in Dockerfile.**     |
 | `MemoryLimit`   | `128` (MB)                                  | Lightweight.                                              |
 | `CPUCount`      | `1`                                         | —                                                        |
 | `StorageLimit`  | `256` (MB)                                  | —                                                        |
 | Network mode    | **Isolated**                                | Hands out a shell; block egress/pivots.                  |
-| Flag template   | `flag{[TEAM_HASH]}`                         | Per-team flag → injected as `GZCTF_FLAG`.                |
+| Flag template   | `ISAG{[TEAM_HASH]}`                         | Per-team dynamic flag → injected as `GZCTF_FLAG`.        |
 
 - **Do not** set `no-new-privileges` (breaks the SUID privesc).
 - Moving Phase 1 → Phase 2 needs no image change: `GZCTF_FLAG` fallback + port-80/no-EXPOSE already baked in.
@@ -292,7 +296,7 @@ On a freshly built container:
 10. **Stage 3 no breadcrumb:** `su -l` and login reveal nothing naming `functionbin`.
 11. **Stage 3 read works:** as `web`, `cat /root/root.txt` → denied; `functionbin -x /root/root.txt` → prints the flag.
 12. **SUID inventory:** exactly one non-standard SUID binary, `functionbin` (`root:root`, `4755`).
-13. **Flag plumbing:** `GZCTF_FLAG=flag{unit_test}` → that exact value in `/root/root.txt` (`root:root`, `0400`) and via `functionbin -x`.
+13. **Flag plumbing:** `GZCTF_FLAG=ISAG{unit_test}` → that exact value in `/root/root.txt` (`root:root`, `0400`) and via `functionbin -x`.
 14. **No debug console:** Werkzeug debugger not reachable (DEBUG=False, gunicorn).
 15. **Write scope:** the app can UPDATE the users table (intended) but `web` cannot modify app source under `/app`.
 16. **No unintended RCE:** no upload/eval/pickle/command-injection sink besides the intended SSTI.

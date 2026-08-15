@@ -1,20 +1,37 @@
 # ShopStack — deliberately vulnerable CTF challenge image.
-# NOTE: no EXPOSE on purpose. GZ::CTF maps the internal port 80 to a random host
-# port; declaring EXPOSE is unnecessary and deviates from the platform contract.
-FROM python:3-slim
+#
+# NOTE: no EXPOSE on purpose. The app listens on port 80 inside the container and
+# the host (or CTF platform) maps it to whatever port it likes.
+#
+# Multi-stage: the SUID binary is compiled in a throwaway `build` stage, so the
+# ~180MB toolchain (gcc/libc6-dev/make) never lands in the final image. That keeps
+# the image small AND leaves no compiler on the challenge box (extra hardening).
+# functionbin is built -static (see privesc/Makefile), so it needs no libs at runtime.
 
-# Build tooling for the SUID binary + sqlite3 CLI + util-linux (setpriv) and su.
+# --- Build stage: compile the static SUID binary ----------------------------
+FROM python:3-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libc6-dev \
         make \
+    && rm -rf /var/lib/apt/lists/*
+COPY privesc/ /tmp/privesc/
+RUN make -C /tmp/privesc
+
+# --- Runtime stage ----------------------------------------------------------
+FROM python:3-slim
+
+# Runtime-only tooling: sqlite3 CLI (seed DB), util-linux (setpriv), passwd (su).
+RUN apt-get update && apt-get install -y --no-install-recommends \
         sqlite3 \
         util-linux \
         passwd \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user. The app and reverse shell run as `web`, never root.
-RUN useradd --create-home --shell /bin/bash web
+# Shell is /bin/sh (dash) — bash is removed below, so the intended reverse shell
+# must be built with python3, not bash/nc.
+RUN useradd --create-home --shell /bin/sh web
 
 # --- Python app --------------------------------------------------------------
 WORKDIR /app
@@ -26,19 +43,17 @@ COPY app/ /app/
 RUN chown -R root:root /app && chmod -R 0644 /app \
     && find /app -type d -exec chmod 0755 {} \;
 
-# --- Build the SUID privesc binary ------------------------------------------
-COPY privesc/ /tmp/privesc/
-RUN make -C /tmp/privesc \
-    && cp /tmp/privesc/functionbin /usr/local/bin/functionbin \
-    && chown root:root /usr/local/bin/functionbin \
+# --- Install the SUID privesc binary (compiled in the build stage) ----------
+COPY --from=build /tmp/privesc/functionbin /usr/local/bin/functionbin
+RUN chown root:root /usr/local/bin/functionbin \
     && chmod 4755 /usr/local/bin/functionbin
 
-# --- Breadcrumb: web login profile ------------------------------------------
-RUN cp /tmp/privesc/web.profile /home/web/.profile \
-    && cp /tmp/privesc/web.profile /home/web/.bashrc \
-    && chown web:web /home/web/.profile /home/web/.bashrc \
-    && chmod 0644 /home/web/.profile /home/web/.bashrc \
-    && rm -rf /tmp/privesc
+# --- Environmental hardening (Stage 2) --------------------------------------
+# Remove common reverse-shell / download tools so the obvious payloads fail and
+# the intended solution is a python3 reverse shell. python3 stays (it IS the base).
+RUN for t in bash nc ncat netcat socat curl wget telnet; do \
+        for d in /bin /usr/bin /usr/local/bin; do rm -f "$d/$t"; done; \
+    done
 
 # --- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /entrypoint.sh

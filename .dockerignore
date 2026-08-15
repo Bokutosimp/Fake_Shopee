@@ -1,7 +1,10 @@
-DESIGN.md
+README.md
+CHALLENGE.md
+LICENSE
 SOLVE.md
 docker-compose.yml
 .git
+.claude
 **/__pycache__
 *.pyc
 *.db

@@ -1,12 +1,12 @@
-# ShopStack — deliberately vulnerable CTF challenge image (HARD revision).
-# NOTE: no EXPOSE on purpose. GZ::CTF maps the internal port 80 to a random host
-# port; declaring EXPOSE is unnecessary and deviates from the platform contract.
+# ShopStack — deliberately vulnerable CTF challenge image.
+#
+# NOTE: no EXPOSE on purpose. The app listens on port 80 inside the container and
+# the host (or CTF platform) maps it to whatever port it likes.
 #
 # Multi-stage: the SUID binary is compiled in a throwaway `build` stage, so the
-# ~180MB toolchain (gcc/libc6-dev/make) never lands in the final image. This
-# keeps every runtime layer under Cloudflare's ~100MB per-blob push limit AND
-# removes compilers from the challenge box (extra hardening). functionbin is
-# built -static (see privesc/Makefile), so it needs no libs at runtime.
+# ~180MB toolchain (gcc/libc6-dev/make) never lands in the final image. That keeps
+# the image small AND leaves no compiler on the challenge box (extra hardening).
+# functionbin is built -static (see privesc/Makefile), so it needs no libs at runtime.
 
 # --- Build stage: compile the static SUID binary ----------------------------
 FROM python:3-slim AS build

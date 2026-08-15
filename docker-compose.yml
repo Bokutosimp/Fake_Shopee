@@ -1,10 +1,10 @@
-# LOCAL testing only. NOT used by GZ::CTF (which orchestrates the image itself).
-# Injects a test GZCTF_FLAG and maps the internal port 80 to host 8080.
+# LOCAL testing only. A CTF platform orchestrates the image itself and does not
+# use this file. Injects a test flag and maps the internal port 80 to host 8080.
 services:
   shopstack:
     build: .
     image: shopstack:local
     environment:
-      GZCTF_FLAG: "ISAG{local_test}"
+      GZCTF_FLAG: "flag{local_test}"
     ports:
       - "8080:80"

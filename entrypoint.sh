@@ -10,14 +10,14 @@ DB_PATH="/home/web/shopstack.db"
 export SHOPSTACK_DB="$DB_PATH"
 
 # --- Root flag ---------------------------------------------------------------
-# GZ::CTF injects the per-team flag as $GZCTF_FLAG. Fall back to a placeholder for
-# local testing. Written BEFORE privileges are dropped.
+# The hosting platform injects the flag as $GZCTF_FLAG. Fall back to a placeholder
+# for local testing. Written BEFORE privileges are dropped.
 # NOTE: an explicit if-check, not ${VAR:-default}, because the flag contains '{'
 # and '}' and POSIX ${...} expansion ends at the first '}', which would corrupt it.
 if [ -n "${GZCTF_FLAG:-}" ]; then
     FLAG="$GZCTF_FLAG"
 else
-    FLAG="ISAG{local_test_placeholder}"
+    FLAG="flag{local_test_placeholder}"
 fi
 printf '%s\n' "$FLAG" > /root/root.txt
 chown root:root /root/root.txt
@@ -59,7 +59,7 @@ chown root:root /usr/local/bin/functionbin
 chmod 4755 /usr/local/bin/functionbin
 
 # --- Drop privileges and start the app ---------------------------------------
-# gunicorn binds port 80 (internal only; GZ::CTF maps it). DEBUG stays off.
+# gunicorn binds port 80 inside the container; the host maps it. DEBUG stays off.
 cd /app
 exec setpriv --reuid web --regid web --init-groups \
     gunicorn --bind 0.0.0.0:80 --workers 2 --chdir /app app:app

@@ -1,7 +1,12 @@
 __pycache__/
 *.pyc
 *.db
-.claude/settings.local.json
+
+# Compiled SUID binary — built inside the image, never committed.
 privesc/functionbin
+
+# Local solution notes. Keep them out of a public repo.
 SOLVE.md
 SOLVE-COMPACT.md
+
+.claude/
